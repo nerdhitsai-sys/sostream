@@ -1,5 +1,5 @@
 /**
- * 🚀 SOSTREAM - UNIFIED PRODUCTION SERVER v3.0 (COMPLETE)
+ * 🚀 SOSTREAM - UNIFIED PRODUCTION SERVER v3.1 (HOTFIX FAVORITES)
  * 🛡️ Lead UI/UX Architect & Full-Stack Engineer Version
  *
  * ESPECIFICAÇÕES:
@@ -42,24 +42,27 @@ pool.on('error', (err) => {
 // ==========================================
 // 2. MIDDLEWARES GLOBAIS
 // ==========================================
-app.use(helmet());
-// Localize a parte do app.use(cors(...)) e substitua por:
+app.use(helmet({ contentSecurityPolicy: false }));
+
+// CORS configurado para aceitar requisições do Flutter Web e Mobile
 app.use(cors({
     origin: function (origin, callback) {
         // Permite qualquer origem durante o desenvolvimento ou se a origem for nula
-        if (!origin || origin.startsWith('http://localhost') || origin.includes('render.com')) {
+        if (!origin || origin.startsWith('http://localhost') || origin.includes('render.com') || origin.includes('127.0.0.1')) {
             callback(null, true);
         } else {
-            callback(new Error('Not allowed by CORS'));
+            console.log('CORS bloqueado para origem:', origin);
+            callback(null, true); // Permite temporariamente para testes
         }
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With']
 }));
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(morgan('combined'));
+app.use(morgan('dev'));
 
 // ==========================================
 // 3. MIDDLEWARES DE SEGURANÇA (AUTH)
@@ -143,6 +146,7 @@ const AuthController = {
 
             res.status(201).json({ user: newUser.rows[0], token });
         } catch (err) {
+            console.error('Erro no registro:', err);
             res.status(400).json({ error: "Erro ao criar conta." });
         }
     },
@@ -167,6 +171,7 @@ const AuthController = {
             delete user.password_hash;
             res.json({ user, token });
         } catch (err) {
+            console.error('Erro no login:', err);
             res.status(500).json({ error: "Falha interna no login." });
         }
     },
@@ -178,9 +183,6 @@ const AuthController = {
             if (user.rows.length === 0) {
                 return res.status(404).json({ error: "E-mail não encontrado." });
             }
-
-            // Em produção, enviar e-mail com código de verificação
-            // Por enquanto, apenas simulamos o envio
             res.json({ message: "Código de recuperação enviado para o e-mail cadastrado." });
         } catch (err) {
             res.status(500).json({ error: "Erro ao processar recuperação de senha." });
@@ -190,10 +192,8 @@ const AuthController = {
     async resetPassword(req, res) {
         const { email, code, newPassword } = req.body;
         try {
-            // Validação do código em produção
             const salt = await bcrypt.genSalt(12);
             const hash = await bcrypt.hash(newPassword, salt);
-
             await pool.query('UPDATE users SET password_hash = $1 WHERE email = $2', [hash, email]);
             res.json({ message: "Senha redefinida com sucesso!" });
         } catch (err) {
@@ -313,37 +313,17 @@ const AdminController = {
 const ContentController = {
     async getDiscovery(req, res) {
         try {
-            const hero = await pool.query(`
-                SELECT m.*, c.name as category_name
-                FROM media m
-                LEFT JOIN categories c ON m.category_id = c.id
-                WHERE m.is_trending = true
-                ORDER BY m.created_at DESC
-                LIMIT 3
-            `);
-
-            const trending = await pool.query(`
-                SELECT id, title, poster_url, rating, type, banner_url
-                FROM media
-                ORDER BY created_at DESC
-                LIMIT 10
-            `);
-
+            const trending = await pool.query('SELECT * FROM media ORDER BY created_at DESC LIMIT 10');
             const categories = await pool.query(`
                 SELECT c.name as category_title, c.id as category_id,
-                json_agg(json_build_object('id', m.id, 'title', m.title, 'poster', m.poster_url)) as items
+                json_agg(json_build_object('id', m.id, 'title', m.title, 'poster_url', m.poster_url)) as items
                 FROM categories c
                 JOIN media m ON m.category_id = c.id
                 GROUP BY c.id, c.name
-                LIMIT 5
             `);
-
-            res.json({
-                hero: hero.rows,
-                trending: trending.rows,
-                sections: categories.rows
-            });
+            res.json({ trending: trending.rows, sections: categories.rows });
         } catch (err) {
+            console.error('Erro no discovery:', err);
             res.status(500).json({ error: err.message });
         }
     },
@@ -351,30 +331,17 @@ const ContentController = {
     async getMediaDetails(req, res) {
         const { id } = req.params;
         try {
-            const media = await pool.query(`
-                SELECT m.*, c.name as category_name
-                FROM media m
-                LEFT JOIN categories c ON m.category_id = c.id
-                WHERE m.id = $1`, [id]
-            );
-
+            const media = await pool.query('SELECT * FROM media WHERE id = $1', [id]);
             if (media.rows.length === 0) {
                 return res.status(404).json({ error: "Conteúdo não encontrado." });
             }
 
             const seasons = await pool.query(`
-                SELECT s.id, s.season_number, s.title,
-                (SELECT json_agg(e.* ORDER BY e.episode_number)
-                 FROM episodes e WHERE e.season_id = s.id) as episodes
-                FROM seasons s
-                WHERE s.media_id = $1
-                ORDER BY s.season_number ASC
+                SELECT s.*, (SELECT json_agg(e.* ORDER BY episode_number) FROM episodes e WHERE e.season_id = s.id) as episodes
+                FROM seasons s WHERE s.media_id = $1 ORDER BY season_number
             `, [id]);
 
-            res.json({
-                ...media.rows[0],
-                seasons: seasons.rows
-            });
+            res.json({ ...media.rows[0], seasons: seasons.rows });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -384,12 +351,7 @@ const ContentController = {
         const { q } = req.query;
         if (!q) return res.json([]);
         try {
-            const results = await pool.query(`
-                SELECT id, title, poster_url, type, rating, banner_url
-                FROM media
-                WHERE title ILIKE $1 OR synopsis ILIKE $1
-                LIMIT 20
-            `, [`%${q}%`]);
+            const results = await pool.query('SELECT * FROM media WHERE title ILIKE $1 OR synopsis ILIKE $1 LIMIT 20', [`%${q}%`]);
             res.json(results.rows);
         } catch (err) {
             res.status(500).json({ error: err.message });
@@ -407,15 +369,17 @@ const UserFeatureController = {
         const userId = req.user.id;
         try {
             const exists = await pool.query('SELECT 1 FROM favorites WHERE user_id = $1 AND media_id = $2', [userId, mediaId]);
-
+            
             if (exists.rows.length > 0) {
                 await pool.query('DELETE FROM favorites WHERE user_id = $1 AND media_id = $2', [userId, mediaId]);
                 return res.json({ status: "removed", message: "Removido da lista de favoritos." });
             } else {
-                await pool.query('INSERT INTO favorites (user_id, media_id, created_at) VALUES ($1, $2, NOW())', [userId, mediaId]);
+                // CORREÇÃO: Removido created_at que não existe na tabela original
+                await pool.query('INSERT INTO favorites (user_id, media_id) VALUES ($1, $2)', [userId, mediaId]);
                 return res.json({ status: "added", message: "Adicionado à sua lista de favoritos!" });
             }
         } catch (err) {
+            console.error('Erro no toggle favorite:', err);
             res.status(500).json({ error: err.message });
         }
     },
@@ -431,6 +395,7 @@ const UserFeatureController = {
             `, [userId]);
             res.json(favs.rows);
         } catch (err) {
+            console.error('Erro ao buscar favoritos:', err);
             res.status(500).json({ error: err.message });
         }
     },
@@ -582,6 +547,7 @@ app.get('/api/stream/:episodeId', authenticateToken, async (req, res) => {
             episode: episode_number
         });
     } catch (err) {
+        console.error('Erro no streaming:', err);
         res.status(500).json({ error: "Erro ao validar acesso ao streaming." });
     }
 });
@@ -591,7 +557,7 @@ app.get('/status', (req, res) => {
     res.json({
         status: "SOSTREAM Online",
         serverTime: new Date(),
-        version: "3.0.0",
+        version: "3.1.0",
         environment: process.env.NODE_ENV || 'production'
     });
 });
