@@ -43,9 +43,19 @@ pool.on('error', (err) => {
 // 2. MIDDLEWARES GLOBAIS
 // ==========================================
 app.use(helmet());
+// Localize a parte do app.use(cors(...)) e substitua por:
 app.use(cors({
-    origin: ['http://localhost:3000', 'https://sostream.onrender.com', '*'],
-    credentials: true
+    origin: function (origin, callback) {
+        // Permite qualquer origem durante o desenvolvimento ou se a origem for nula
+        if (!origin || origin.startsWith('http://localhost') || origin.includes('render.com')) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(morgan('combined'));
