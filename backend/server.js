@@ -1,6 +1,5 @@
 /**
- * 🚀 SOSTREAM - UNIFIED PRODUCTION SERVER v3.2 (MEGA PROXY INTEGRADO)
- * 🛡️ Com suporte completo a streaming de vídeos do MEGA.nz
+ * 🚀 SOSTREAM - PRODUCTION SERVER v3.3 (MEGA PROXY CORRIGIDO)
  */
 
 const express = require('express');
@@ -354,7 +353,7 @@ const ProfileController = {
 };
 
 // ==========================================
-// 8. MEGA PROXY STREAMING (INTEGRADO E FUNCIONAL)
+// 8. MEGA PROXY STREAMING (CORRIGIDO)
 // ==========================================
 
 const MegaProxyController = {
@@ -365,16 +364,18 @@ const MegaProxyController = {
             return res.status(400).json({ error: 'URL do MEGA não fornecida' });
         }
 
-        console.log(`🎬 MEGA STREAM: Solicitando URL: ${megaUrl.substring(0, 80)}...`);
+        console.log(`🎬 MEGA PROXY: Processando URL: ${megaUrl.substring(0, 80)}...`);
 
         try {
             // Cria o objeto do arquivo MEGA
             const file = File.fromURL(megaUrl);
             
-            // Aguarda a preparação do arquivo
+            // Aguarda o carregamento dos atributos do arquivo
             await file.loadAttributes();
             
-            console.log(`📁 Arquivo MEGA: ${file.name}, Tamanho: ${file.size} bytes`);
+            console.log(`📁 Arquivo: ${file.name}`);
+            console.log(`📦 Tamanho: ${file.size} bytes`);
+            console.log(`🔐 Criptografado: ${file.key ? 'Sim' : 'Não'}`);
 
             // Headers para streaming
             const headers = {
@@ -385,8 +386,9 @@ const MegaProxyController = {
                 'Content-Disposition': `inline; filename="${file.name}"`
             };
 
-            // Suporte a Range (permite seek no vídeo)
+            // Verifica se há suporte a Range (para seek)
             const range = req.headers.range;
+            
             if (range) {
                 const parts = range.replace(/bytes=/, "").split("-");
                 const start = parseInt(parts[0], 10);
@@ -395,20 +397,34 @@ const MegaProxyController = {
 
                 headers['Content-Range'] = `bytes ${start}-${end}/${file.size}`;
                 headers['Content-Length'] = chunksize;
-                res.writeHead(206, headers);
                 
                 console.log(`📊 Streaming parcial: bytes ${start}-${end}/${file.size}`);
+                res.writeHead(206, headers);
                 
                 // Cria stream com range específico
-                const stream = file.download({ start, end });
-                stream.pipe(res);
+                const downloadStream = file.download({ start, end });
+                downloadStream.pipe(res);
+                
+                downloadStream.on('error', (err) => {
+                    console.error('❌ Erro no stream:', err.message);
+                    if (!res.headersSent) {
+                        res.status(500).json({ error: 'Erro no streaming do vídeo' });
+                    }
+                });
             } else {
-                res.writeHead(200, headers);
                 console.log(`📊 Streaming completo: ${file.size} bytes`);
+                res.writeHead(200, headers);
                 
                 // Stream completo
-                const stream = file.download();
-                stream.pipe(res);
+                const downloadStream = file.download();
+                downloadStream.pipe(res);
+                
+                downloadStream.on('error', (err) => {
+                    console.error('❌ Erro no stream:', err.message);
+                    if (!res.headersSent) {
+                        res.status(500).json({ error: 'Erro no streaming do vídeo' });
+                    }
+                });
             }
 
         } catch (error) {
@@ -429,8 +445,7 @@ const MegaProxyController = {
         try {
             // Busca informações do episódio
             const content = await pool.query(`
-                SELECT e.is_free, u.is_premium, e.video_url, e.mega_url, e.title, e.episode_number,
-                       COALESCE(e.video_url, e.mega_url) as source_url
+                SELECT e.is_free, u.is_premium, e.video_url, e.title, e.episode_number
                 FROM episodes e, users u
                 WHERE e.id = $1 AND u.id = $2
             `, [episodeId, userId]);
@@ -439,7 +454,7 @@ const MegaProxyController = {
                 return res.status(404).json({ error: "Episódio não encontrado." });
             }
 
-            const { is_free, is_premium, video_url, mega_url, title, episode_number, source_url } = content.rows[0];
+            const { is_free, is_premium, video_url, title, episode_number } = content.rows[0];
 
             // Validação de acesso premium
             if (!is_free && !is_premium) {
@@ -450,19 +465,18 @@ const MegaProxyController = {
                 });
             }
 
-            if (!source_url) {
+            if (!video_url) {
                 return res.status(404).json({ error: "URL do vídeo não configurada para este episódio." });
             }
 
             console.log(`🎬 EPISÓDIO ${episodeId}: ${title}`);
-            console.log(`📹 URL fonte: ${source_url.substring(0, 80)}...`);
+            console.log(`📹 URL: ${video_url.substring(0, 80)}...`);
 
-            // Se for URL do MEGA, retorna o link para o proxy
-            if (source_url.includes('mega.nz')) {
-                const proxyUrl = `/api/mega/stream?url=${encodeURIComponent(source_url)}`;
-                console.log(`🔄 MEGA Proxy: ${proxyUrl}`);
+            // Se for URL do MEGA, redireciona para o proxy
+            if (video_url.includes('mega.nz')) {
+                const proxyUrl = `/api/mega/stream?url=${encodeURIComponent(video_url)}`;
+                console.log(`🔄 Redirecionando para proxy MEGA`);
                 
-                // Redireciona para o proxy MEGA
                 return res.json({
                     stream_type: 'mega_proxy',
                     proxy_url: proxyUrl,
@@ -548,13 +562,12 @@ const AdminController = {
     },
 
     async createEpisode(req, res) {
-        const { season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, mega_url } = req.body;
+        const { season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free } = req.body;
         try {
-            const videoSource = video_url || mega_url;
             const result = await pool.query(
                 `INSERT INTO episodes (season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) RETURNING *`,
-                [season_id, episode_number, title, synopsis, duration_minutes, videoSource, thumbnail_url, is_free || false]
+                [season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free || false]
             );
             res.status(201).json({ message: "Episódio publicado com sucesso!", data: result.rows[0] });
         } catch (err) {
@@ -639,7 +652,7 @@ app.get('/status', (req, res) => {
     res.json({
         status: "SOSTREAM Online",
         serverTime: new Date(),
-        version: "3.2.0",
+        version: "3.3.0",
         environment: process.env.NODE_ENV || 'production',
         features: {
             mega_proxy: true,
@@ -661,11 +674,11 @@ app.use(errorHandler);
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔════════════════════════════════════════════════════════════════╗
-║         🚀 SOSTREAM PRODUCTION SERVER v3.2 (MEGA PROXY)       ║
+║         🚀 SOSTREAM PRODUCTION SERVER v3.3 (MEGA FIX)         ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  📡 PORTA: ${PORT}                                              ║
 ║  🌍 MODO: ${process.env.NODE_ENV || 'production'}                                            ║
-║  📹 MEGA PROXY: ATIVO - Streaming direto via megajs            ║
+║  📹 MEGA PROXY: CORRIGIDO - Streaming funcional               ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  📋 ROTAS DISPONÍVEIS:                                         ║
 ║     • Streaming MEGA: /api/mega/stream?url={mega_link}        ║
