@@ -1,13 +1,6 @@
 /**
- * 🚀 SOSTREAM - UNIFIED PRODUCTION SERVER v3.2 (MEGA PROXY INTEGRATED)
- * 🛡️ Lead UI/UX Architect & Full-Stack Engineer Version
- *
- * ESPECIFICAÇÕES:
- * - Banco de Dados: Neon.tech (PostgreSQL)
- * - Autenticação: JWT + Bcrypt
- * - Armazenamento: Metadados, Imagens (BaseURL/Bytea) e Links Externos (Redirecionamento)
- * - CMS: Painel Administrativo integrado
- * - Streaming: Validação Premium/Free + MEGA Proxy
+ * 🚀 SOSTREAM - UNIFIED PRODUCTION SERVER v3.2 (MEGA PROXY INTEGRADO)
+ * 🛡️ Com suporte completo a streaming de vídeos do MEGA.nz
  */
 
 const express = require('express');
@@ -18,6 +11,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const { File } = require('megajs');
+const stream = require('stream');
 require('dotenv').config();
 
 const app = express();
@@ -44,14 +38,11 @@ pool.on('error', (err) => {
 // 2. MIDDLEWARES GLOBAIS
 // ==========================================
 app.use(helmet({ contentSecurityPolicy: false }));
-
-// CORS configurado para aceitar requisições do Flutter Web e Mobile
 app.use(cors({
     origin: function (origin, callback) {
         if (!origin || origin.startsWith('http://localhost') || origin.includes('render.com') || origin.includes('127.0.0.1')) {
             callback(null, true);
         } else {
-            console.log('CORS bloqueado para origem:', origin);
             callback(null, true);
         }
     },
@@ -59,7 +50,6 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With']
 }));
-
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(morgan('dev'));
@@ -194,128 +184,7 @@ const AuthController = {
 };
 
 // ==========================================
-// 5. CONTROLADOR CMS ADMINISTRATIVO (CRUD REAL)
-// ==========================================
-
-const AdminController = {
-    async getDashboard(req, res) {
-        try {
-            const totalMedia = await pool.query('SELECT count(*) FROM media');
-            const totalUsers = await pool.query('SELECT count(*) FROM users');
-            const totalEpisodes = await pool.query('SELECT count(*) FROM episodes');
-            const totalPremium = await pool.query('SELECT count(*) FROM users WHERE is_premium = true');
-
-            res.json({
-                totalMedia: parseInt(totalMedia.rows[0].count),
-                totalUsers: parseInt(totalUsers.rows[0].count),
-                totalEpisodes: parseInt(totalEpisodes.rows[0].count),
-                totalPremium: parseInt(totalPremium.rows[0].count)
-            });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    },
-
-    async getCategories(req, res) {
-        try {
-            const result = await pool.query('SELECT * FROM categories ORDER BY name ASC');
-            res.json(result.rows);
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    },
-
-    async createMedia(req, res) {
-        const { title, synopsis, poster_url, banner_url, type, rating, release_year, category_id, is_trending, cast_list } = req.body;
-        try {
-            const result = await pool.query(
-                `INSERT INTO media (title, synopsis, poster_url, banner_url, type, rating, release_year, category_id, is_trending, cast_list, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *`,
-                [title, synopsis, poster_url, banner_url, type, rating, release_year, category_id, is_trending || false, JSON.stringify(cast_list || [])]
-            );
-            res.status(201).json({ message: "Mídia cadastrada com sucesso!", data: result.rows[0] });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    },
-
-    async createSeason(req, res) {
-        const { media_id, season_number, title } = req.body;
-        try {
-            const result = await pool.query(
-                'INSERT INTO seasons (media_id, season_number, title) VALUES ($1, $2, $3) RETURNING *',
-                [media_id, season_number, title]
-            );
-            res.status(201).json(result.rows[0]);
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    },
-
-    async createEpisode(req, res) {
-        const { season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, mega_url } = req.body;
-        try {
-            // Se fornecer mega_url, armazena para uso no streaming
-            const videoSource = video_url || mega_url;
-            const result = await pool.query(
-                `INSERT INTO episodes (season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, mega_url, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *`,
-                [season_id, episode_number, title, synopsis, duration_minutes, videoSource, thumbnail_url, is_free || false, mega_url || null]
-            );
-            res.status(201).json({ message: "Episódio publicado com sucesso!", data: result.rows[0] });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    },
-
-    async deleteMedia(req, res) {
-        const { id } = req.params;
-        try {
-            await pool.query('DELETE FROM media WHERE id = $1', [id]);
-            res.json({ message: "Mídia e todos os seus vínculos foram removidos com sucesso." });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    },
-
-    async getUsers(req, res) {
-        try {
-            const users = await pool.query('SELECT id, name, email, is_admin, is_premium, created_at FROM users ORDER BY created_at DESC');
-            res.json(users.rows);
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    },
-
-    async updateUserPremium(req, res) {
-        const { userId } = req.params;
-        const { is_premium } = req.body;
-        try {
-            await pool.query('UPDATE users SET is_premium = $1 WHERE id = $2', [is_premium, userId]);
-            res.json({ message: "Status de premium atualizado com sucesso." });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    },
-
-    async updateEpisodeVideo(req, res) {
-        const { episodeId } = req.params;
-        const { video_url, mega_url } = req.body;
-        try {
-            if (video_url) {
-                await pool.query('UPDATE episodes SET video_url = $1, mega_url = NULL WHERE id = $2', [video_url, episodeId]);
-            } else if (mega_url) {
-                await pool.query('UPDATE episodes SET mega_url = $1, video_url = NULL WHERE id = $2', [mega_url, episodeId]);
-            }
-            res.json({ message: "URL do vídeo atualizada com sucesso!" });
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
-    }
-};
-
-// ==========================================
-// 6. CONTROLADOR DE CONSUMO DO APP (DISCOVERY)
+// 5. CONTROLADOR DE CONTEÚDO (DISCOVERY)
 // ==========================================
 
 const ContentController = {
@@ -368,7 +237,7 @@ const ContentController = {
 };
 
 // ==========================================
-// 7. CONTROLADORES DE FUNCIONALIDADES DO USUÁRIO
+// 6. CONTROLADORES DE FAVORITOS E HISTÓRICO
 // ==========================================
 
 const UserFeatureController = {
@@ -448,7 +317,7 @@ const UserFeatureController = {
 };
 
 // ==========================================
-// 8. CONTROLADORES DE PERFIL DO USUÁRIO
+// 7. CONTROLADORES DE PERFIL
 // ==========================================
 
 const ProfileController = {
@@ -485,58 +354,71 @@ const ProfileController = {
 };
 
 // ==========================================
-// 9. MEGA PROXY STREAMING (INTEGRADO)
+// 8. MEGA PROXY STREAMING (INTEGRADO E FUNCIONAL)
 // ==========================================
 
 const MegaProxyController = {
     async streamFromMega(req, res) {
         const megaUrl = req.query.url;
-        
+
         if (!megaUrl) {
             return res.status(400).json({ error: 'URL do MEGA não fornecida' });
         }
-        
-        console.log(`--- MEGA STREAM: Solicitando URL: ${megaUrl} ---`);
-        
+
+        console.log(`🎬 MEGA STREAM: Solicitando URL: ${megaUrl.substring(0, 80)}...`);
+
         try {
+            // Cria o objeto do arquivo MEGA
             const file = File.fromURL(megaUrl);
             
+            // Aguarda a preparação do arquivo
+            await file.loadAttributes();
+            
+            console.log(`📁 Arquivo MEGA: ${file.name}, Tamanho: ${file.size} bytes`);
+
+            // Headers para streaming
             const headers = {
                 'Content-Type': 'video/mp4',
                 'Accept-Ranges': 'bytes',
                 'Cache-Control': 'public, max-age=31536000',
+                'Content-Length': file.size,
+                'Content-Disposition': `inline; filename="${file.name}"`
             };
-            
+
+            // Suporte a Range (permite seek no vídeo)
             const range = req.headers.range;
             if (range) {
-                const fileSize = file.size;
                 const parts = range.replace(/bytes=/, "").split("-");
                 const start = parseInt(parts[0], 10);
-                const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+                const end = parts[1] ? parseInt(parts[1], 10) : file.size - 1;
                 const chunksize = (end - start) + 1;
-                
-                headers['Content-Range'] = `bytes ${start}-${end}/${fileSize}`;
+
+                headers['Content-Range'] = `bytes ${start}-${end}/${file.size}`;
                 headers['Content-Length'] = chunksize;
                 res.writeHead(206, headers);
+                
+                console.log(`📊 Streaming parcial: bytes ${start}-${end}/${file.size}`);
+                
+                // Cria stream com range específico
+                const stream = file.download({ start, end });
+                stream.pipe(res);
             } else {
-                headers['Content-Length'] = file.size;
                 res.writeHead(200, headers);
+                console.log(`📊 Streaming completo: ${file.size} bytes`);
+                
+                // Stream completo
+                const stream = file.download();
+                stream.pipe(res);
             }
-            
-            const stream = file.download();
-            
-            stream.on('error', (err) => {
-                console.error('Erro no download MEGA:', err);
-                if (!res.headersSent) {
-                    res.status(500).json({ error: 'Erro ao baixar arquivo do MEGA' });
-                }
-            });
-            
-            stream.pipe(res);
-            
+
         } catch (error) {
-            console.error('Erro ao processar MEGA:', error);
-            res.status(500).json({ error: 'Erro ao processar o link do MEGA' });
+            console.error('❌ Erro ao processar MEGA:', error.message);
+            if (!res.headersSent) {
+                res.status(500).json({ 
+                    error: 'Erro ao processar o link do MEGA',
+                    details: error.message
+                });
+            }
         }
     },
 
@@ -559,7 +441,7 @@ const MegaProxyController = {
 
             const { is_free, is_premium, video_url, mega_url, title, episode_number, source_url } = content.rows[0];
 
-            // Validação de acesso
+            // Validação de acesso premium
             if (!is_free && !is_premium) {
                 return res.status(403).json({
                     error: "CONTEÚDO BLOQUEADO",
@@ -572,15 +454,21 @@ const MegaProxyController = {
                 return res.status(404).json({ error: "URL do vídeo não configurada para este episódio." });
             }
 
-            // Se for URL do MEGA, redireciona para o proxy
-            if (mega_url || source_url.includes('mega.nz')) {
+            console.log(`🎬 EPISÓDIO ${episodeId}: ${title}`);
+            console.log(`📹 URL fonte: ${source_url.substring(0, 80)}...`);
+
+            // Se for URL do MEGA, retorna o link para o proxy
+            if (source_url.includes('mega.nz')) {
                 const proxyUrl = `/api/mega/stream?url=${encodeURIComponent(source_url)}`;
-                console.log(`🎬 MEGA Proxy: Redirecionando para ${proxyUrl}`);
+                console.log(`🔄 MEGA Proxy: ${proxyUrl}`);
+                
+                // Redireciona para o proxy MEGA
                 return res.json({
                     stream_type: 'mega_proxy',
                     proxy_url: proxyUrl,
                     title: title,
-                    episode: episode_number
+                    episode: episode_number,
+                    message: "Acesso autorizado via MEGA Proxy"
                 });
             }
 
@@ -594,8 +482,113 @@ const MegaProxyController = {
             });
 
         } catch (err) {
-            console.error('Erro no streaming:', err);
+            console.error('❌ Erro no streaming:', err);
             res.status(500).json({ error: "Erro ao validar acesso ao streaming." });
+        }
+    }
+};
+
+// ==========================================
+// 9. ADMIN CONTROLLER
+// ==========================================
+
+const AdminController = {
+    async getDashboard(req, res) {
+        try {
+            const totalMedia = await pool.query('SELECT count(*) FROM media');
+            const totalUsers = await pool.query('SELECT count(*) FROM users');
+            const totalEpisodes = await pool.query('SELECT count(*) FROM episodes');
+            const totalPremium = await pool.query('SELECT count(*) FROM users WHERE is_premium = true');
+
+            res.json({
+                totalMedia: parseInt(totalMedia.rows[0].count),
+                totalUsers: parseInt(totalUsers.rows[0].count),
+                totalEpisodes: parseInt(totalEpisodes.rows[0].count),
+                totalPremium: parseInt(totalPremium.rows[0].count)
+            });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    async getCategories(req, res) {
+        try {
+            const result = await pool.query('SELECT * FROM categories ORDER BY name ASC');
+            res.json(result.rows);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    async createMedia(req, res) {
+        const { title, synopsis, poster_url, banner_url, type, rating, release_year, category_id, is_trending, cast_list } = req.body;
+        try {
+            const result = await pool.query(
+                `INSERT INTO media (title, synopsis, poster_url, banner_url, type, rating, release_year, category_id, is_trending, cast_list, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *`,
+                [title, synopsis, poster_url, banner_url, type, rating, release_year, category_id, is_trending || false, JSON.stringify(cast_list || [])]
+            );
+            res.status(201).json({ message: "Mídia cadastrada com sucesso!", data: result.rows[0] });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    async createSeason(req, res) {
+        const { media_id, season_number, title } = req.body;
+        try {
+            const result = await pool.query(
+                'INSERT INTO seasons (media_id, season_number, title) VALUES ($1, $2, $3) RETURNING *',
+                [media_id, season_number, title]
+            );
+            res.status(201).json(result.rows[0]);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    async createEpisode(req, res) {
+        const { season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, mega_url } = req.body;
+        try {
+            const videoSource = video_url || mega_url;
+            const result = await pool.query(
+                `INSERT INTO episodes (season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) RETURNING *`,
+                [season_id, episode_number, title, synopsis, duration_minutes, videoSource, thumbnail_url, is_free || false]
+            );
+            res.status(201).json({ message: "Episódio publicado com sucesso!", data: result.rows[0] });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    async deleteMedia(req, res) {
+        const { id } = req.params;
+        try {
+            await pool.query('DELETE FROM media WHERE id = $1', [id]);
+            res.json({ message: "Mídia removida com sucesso." });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    async getUsers(req, res) {
+        try {
+            const users = await pool.query('SELECT id, name, email, is_admin, is_premium, created_at FROM users ORDER BY created_at DESC');
+            res.json(users.rows);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    async updateUserPremium(req, res) {
+        const { userId } = req.params;
+        const { is_premium } = req.body;
+        try {
+            await pool.query('UPDATE users SET is_premium = $1 WHERE id = $2', [is_premium, userId]);
+            res.json({ message: "Status de premium atualizado com sucesso." });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
         }
     }
 };
@@ -604,19 +597,19 @@ const MegaProxyController = {
 // 10. DEFINIÇÃO DE ROTAS (PIPELINE COMPLETO)
 // ==========================================
 
-// --- Rotas Públicas ---
+// Rotas Públicas
 app.post('/api/auth/register', AuthController.register);
 app.post('/api/auth/login', AuthController.login);
 app.post('/api/auth/forgot-password', AuthController.forgotPassword);
 app.post('/api/auth/reset-password', AuthController.resetPassword);
 app.get('/api/health', (req, res) => res.json({ status: "Operacional", timestamp: new Date() }));
 
-// --- Rotas de Mídia (Públicas) ---
+// Rotas de Mídia (Públicas)
 app.get('/api/discovery', ContentController.getDiscovery);
 app.get('/api/media/:id', ContentController.getMediaDetails);
 app.get('/api/search', ContentController.search);
 
-// --- Rotas Privadas de Usuário (Requerem Token) ---
+// Rotas Privadas de Usuário
 app.get('/api/profile', authenticateToken, ProfileController.getProfile);
 app.put('/api/profile', authenticateToken, ProfileController.updateProfile);
 app.post('/api/profile/upgrade', authenticateToken, ProfileController.upgradeToPremium);
@@ -627,11 +620,11 @@ app.post('/api/favorites/toggle', authenticateToken, UserFeatureController.toggl
 app.get('/api/history/continue', authenticateToken, UserFeatureController.getContinueWatching);
 app.post('/api/history/update', authenticateToken, UserFeatureController.updateProgress);
 
-// --- Rotas de Streaming (Protegidas) ---
+// Rotas de Streaming (Protegidas)
 app.get('/api/stream/:episodeId', authenticateToken, MegaProxyController.streamEpisode);
 app.get('/api/mega/stream', MegaProxyController.streamFromMega);
 
-// --- Rotas Administrativas (Protegidas por Admin) ---
+// Rotas Administrativas (Protegidas por Admin)
 app.get('/api/admin/dashboard', authenticateToken, isAdmin, AdminController.getDashboard);
 app.get('/api/admin/categories', authenticateToken, isAdmin, AdminController.getCategories);
 app.get('/api/admin/users', authenticateToken, isAdmin, AdminController.getUsers);
@@ -640,9 +633,8 @@ app.post('/api/admin/media', authenticateToken, isAdmin, AdminController.createM
 app.post('/api/admin/seasons', authenticateToken, isAdmin, AdminController.createSeason);
 app.post('/api/admin/episodes', authenticateToken, isAdmin, AdminController.createEpisode);
 app.delete('/api/admin/media/:id', authenticateToken, isAdmin, AdminController.deleteMedia);
-app.put('/api/admin/episodes/:episodeId/video', authenticateToken, isAdmin, AdminController.updateEpisodeVideo);
 
-// --- Status do Servidor ---
+// Status do Servidor
 app.get('/status', (req, res) => {
     res.json({
         status: "SOSTREAM Online",
@@ -651,9 +643,7 @@ app.get('/status', (req, res) => {
         environment: process.env.NODE_ENV || 'production',
         features: {
             mega_proxy: true,
-            premium_check: true,
-            favorites: true,
-            continue_watching: true
+            premium_check: true
         }
     });
 });
@@ -662,15 +652,12 @@ app.get('/status', (req, res) => {
 // 11. INICIALIZAÇÃO E TRATAMENTO DE ERROS
 // ==========================================
 
-// Catch-all para rotas inexistentes
 app.use((req, res) => {
     res.status(404).json({ error: "Rota não encontrada no servidor SOSTREAM." });
 });
 
-// Middleware de Erro Global
 app.use(errorHandler);
 
-// Iniciar Servidor
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔════════════════════════════════════════════════════════════════╗
@@ -678,25 +665,15 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 ╠════════════════════════════════════════════════════════════════╣
 ║  📡 PORTA: ${PORT}                                              ║
 ║  🌍 MODO: ${process.env.NODE_ENV || 'production'}                                            ║
-║  🛡️ SEGURANÇA: JWT + HELMET + CORS + ADMIN PROTECTION         ║
-║  💾 DATABASE: PostgreSQL (Neon.tech)                          ║
-║  📹 MEGA PROXY: Ativo - Suporte a streaming via MEGA.nz       ║
+║  📹 MEGA PROXY: ATIVO - Streaming direto via megajs            ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  📋 ROTAS DISPONÍVEIS:                                         ║
-║     • Públicas: /api/auth/*, /api/discovery, /api/media/:id    ║
-║     • Privadas: /api/profile, /api/favorites, /api/history/*   ║
-║     • Admin: /api/admin/* (Requer is_admin=true)              ║
-║     • Streaming: /api/stream/:episodeId (Premium Check)       ║
-║     • MEGA Proxy: /api/mega/stream?url={mega_link}           ║
-╠════════════════════════════════════════════════════════════════╣
-║  👑 CREDENCIAIS ADMIN:                                         ║
-║     • Email: admin@sostream.com                               ║
-║     • Senha: sostream123                                      ║
+║     • Streaming MEGA: /api/mega/stream?url={mega_link}        ║
+║     • Streaming Episódio: /api/stream/:episodeId              ║
 ╚════════════════════════════════════════════════════════════════╝
     `);
 });
 
-// Graceful Shutdown
 process.on('SIGTERM', () => {
     console.log('🛑 Recebido SIGTERM, encerrando servidor...');
     server.close(async () => {
