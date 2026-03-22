@@ -1,5 +1,6 @@
 /**
- * 🚀 SOSTREAM - PRODUCTION SERVER v3.3 (MEGA PROXY CORRIGIDO)
+ * 🚀 SOSTREAM - PRODUCTION SERVER v4.0 (UNIVERSAL PLAYER)
+ * Suporte: MEGA.nz, Google Drive, Links Diretos, YouTube Embed
  */
 
 const express = require('express');
@@ -10,7 +11,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const { File } = require('megajs');
-const stream = require('stream');
 require('dotenv').config();
 
 const app = express();
@@ -39,7 +39,7 @@ pool.on('error', (err) => {
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
     origin: function (origin, callback) {
-        if (!origin || origin.startsWith('http://localhost') || origin.includes('render.com') || origin.includes('127.0.0.1')) {
+        if (!origin || origin.startsWith('http://localhost') || origin.includes('render.com') || origin.includes('127.0.0.1') || origin.includes('vercel.app')) {
             callback(null, true);
         } else {
             callback(null, true);
@@ -353,13 +353,69 @@ const ProfileController = {
 };
 
 // ==========================================
-// 8. MEGA PROXY STREAMING (CORRIGIDO)
+// 8. UNIVERSAL PLAYER CONTROLLER (SUPORTE A TODOS OS LINKS)
 // ==========================================
 
-const MegaProxyController = {
-    async streamFromMega(req, res) {
-        const megaUrl = req.query.url;
+const UniversalPlayerController = {
+    // Detecta o tipo de URL e retorna a configuração apropriada
+    detectUrlType(url) {
+        if (!url) return { type: 'unknown', url: null };
 
+        // MEGA.nz
+        if (url.includes('mega.nz') || url.includes('mega.co.nz')) {
+            return { type: 'mega', url: url };
+        }
+
+        // Google Drive
+        if (url.includes('drive.google.com')) {
+            // Extrai o ID do arquivo
+            let fileId = null;
+            if (url.includes('/file/d/')) {
+                const match = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+                if (match) fileId = match[1];
+            } else if (url.includes('id=')) {
+                const match = url.match(/id=([a-zA-Z0-9_-]+)/);
+                if (match) fileId = match[1];
+            }
+            return { type: 'google_drive', url: url, fileId: fileId };
+        }
+
+        // YouTube
+        if (url.includes('youtube.com') || url.includes('youtu.be')) {
+            let videoId = null;
+            if (url.includes('v=')) {
+                const match = url.match(/v=([a-zA-Z0-9_-]+)/);
+                if (match) videoId = match[1];
+            } else if (url.includes('youtu.be/')) {
+                const match = url.match(/youtu.be\/([a-zA-Z0-9_-]+)/);
+                if (match) videoId = match[1];
+            }
+            return { type: 'youtube', url: url, videoId: videoId };
+        }
+
+        // Vimeo
+        if (url.includes('vimeo.com')) {
+            const match = url.match(/vimeo.com\/(\d+)/);
+            return { type: 'vimeo', url: url, videoId: match ? match[1] : null };
+        }
+
+        // Links diretos .mp4, .m3u8, etc
+        if (url.match(/\.(mp4|m3u8|mkv|webm|mov|avi)$/i)) {
+            return { type: 'direct', url: url };
+        }
+
+        // Dailymotion
+        if (url.includes('dailymotion.com')) {
+            const match = url.match(/video\/([a-zA-Z0-9]+)/);
+            return { type: 'dailymotion', url: url, videoId: match ? match[1] : null };
+        }
+
+        return { type: 'unknown', url: url };
+    },
+
+    // Stream via MEGA Proxy
+    async streamMega(req, res) {
+        const megaUrl = req.query.url;
         if (!megaUrl) {
             return res.status(400).json({ error: 'URL do MEGA não fornecida' });
         }
@@ -367,17 +423,12 @@ const MegaProxyController = {
         console.log(`🎬 MEGA PROXY: Processando URL: ${megaUrl.substring(0, 80)}...`);
 
         try {
-            // Cria o objeto do arquivo MEGA
             const file = File.fromURL(megaUrl);
-            
-            // Aguarda o carregamento dos atributos do arquivo
             await file.loadAttributes();
-            
+
             console.log(`📁 Arquivo: ${file.name}`);
             console.log(`📦 Tamanho: ${file.size} bytes`);
-            console.log(`🔐 Criptografado: ${file.key ? 'Sim' : 'Não'}`);
 
-            // Headers para streaming
             const headers = {
                 'Content-Type': 'video/mp4',
                 'Accept-Ranges': 'bytes',
@@ -386,9 +437,7 @@ const MegaProxyController = {
                 'Content-Disposition': `inline; filename="${file.name}"`
             };
 
-            // Verifica se há suporte a Range (para seek)
             const range = req.headers.range;
-            
             if (range) {
                 const parts = range.replace(/bytes=/, "").split("-");
                 const start = parseInt(parts[0], 10);
@@ -397,14 +446,10 @@ const MegaProxyController = {
 
                 headers['Content-Range'] = `bytes ${start}-${end}/${file.size}`;
                 headers['Content-Length'] = chunksize;
-                
-                console.log(`📊 Streaming parcial: bytes ${start}-${end}/${file.size}`);
                 res.writeHead(206, headers);
-                
-                // Cria stream com range específico
+
                 const downloadStream = file.download({ start, end });
                 downloadStream.pipe(res);
-                
                 downloadStream.on('error', (err) => {
                     console.error('❌ Erro no stream:', err.message);
                     if (!res.headersSent) {
@@ -412,13 +457,9 @@ const MegaProxyController = {
                     }
                 });
             } else {
-                console.log(`📊 Streaming completo: ${file.size} bytes`);
                 res.writeHead(200, headers);
-                
-                // Stream completo
                 const downloadStream = file.download();
                 downloadStream.pipe(res);
-                
                 downloadStream.on('error', (err) => {
                     console.error('❌ Erro no stream:', err.message);
                     if (!res.headersSent) {
@@ -426,11 +467,10 @@ const MegaProxyController = {
                     }
                 });
             }
-
         } catch (error) {
             console.error('❌ Erro ao processar MEGA:', error.message);
             if (!res.headersSent) {
-                res.status(500).json({ 
+                res.status(500).json({
                     error: 'Erro ao processar o link do MEGA',
                     details: error.message
                 });
@@ -438,12 +478,12 @@ const MegaProxyController = {
         }
     },
 
+    // Endpoint principal do player universal
     async streamEpisode(req, res) {
         const { episodeId } = req.params;
         const userId = req.user.id;
 
         try {
-            // Busca informações do episódio
             const content = await pool.query(`
                 SELECT e.is_free, u.is_premium, e.video_url, e.title, e.episode_number
                 FROM episodes e, users u
@@ -456,7 +496,6 @@ const MegaProxyController = {
 
             const { is_free, is_premium, video_url, title, episode_number } = content.rows[0];
 
-            // Validação de acesso premium
             if (!is_free && !is_premium) {
                 return res.status(403).json({
                     error: "CONTEÚDO BLOQUEADO",
@@ -469,36 +508,155 @@ const MegaProxyController = {
                 return res.status(404).json({ error: "URL do vídeo não configurada para este episódio." });
             }
 
+            const urlType = this.detectUrlType(video_url);
             console.log(`🎬 EPISÓDIO ${episodeId}: ${title}`);
+            console.log(`📹 Tipo: ${urlType.type}`);
             console.log(`📹 URL: ${video_url.substring(0, 80)}...`);
 
-            // Se for URL do MEGA, redireciona para o proxy
-            if (video_url.includes('mega.nz')) {
-                const proxyUrl = `/api/mega/stream?url=${encodeURIComponent(video_url)}`;
-                console.log(`🔄 Redirecionando para proxy MEGA`);
-                
-                return res.json({
-                    stream_type: 'mega_proxy',
-                    proxy_url: proxyUrl,
-                    title: title,
-                    episode: episode_number,
-                    message: "Acesso autorizado via MEGA Proxy"
-                });
+            let response = {
+                stream_type: urlType.type,
+                title: title,
+                episode: episode_number,
+                original_url: video_url
+            };
+
+            switch (urlType.type) {
+                case 'mega':
+                    response.proxy_url = `/api/universal/stream/mega?url=${encodeURIComponent(video_url)}`;
+                    response.player_type = 'native';
+                    break;
+
+                case 'google_drive':
+                    if (urlType.fileId) {
+                        response.direct_url = `https://drive.usercontent.google.com/download?id=${urlType.fileId}&export=download&confirm=t`;
+                        response.player_type = 'native';
+                    } else {
+                        response.player_type = 'webview';
+                        response.embed_url = `https://drive.google.com/file/d/${urlType.fileId}/preview`;
+                    }
+                    break;
+
+                case 'youtube':
+                    if (urlType.videoId) {
+                        response.player_type = 'webview';
+                        response.embed_url = `https://www.youtube.com/embed/${urlType.videoId}?autoplay=1&controls=1&rel=0&modestbranding=1`;
+                    }
+                    break;
+
+                case 'vimeo':
+                    if (urlType.videoId) {
+                        response.player_type = 'webview';
+                        response.embed_url = `https://player.vimeo.com/video/${urlType.videoId}?autoplay=1&title=0&byline=0&portrait=0`;
+                    }
+                    break;
+
+                case 'dailymotion':
+                    if (urlType.videoId) {
+                        response.player_type = 'webview';
+                        response.embed_url = `https://www.dailymotion.com/embed/video/${urlType.videoId}?autoplay=1`;
+                    }
+                    break;
+
+                case 'direct':
+                    response.player_type = 'native';
+                    response.direct_url = video_url;
+                    break;
+
+                default:
+                    response.player_type = 'webview';
+                    response.embed_url = video_url;
+                    response.warning = "Este link pode não ser compatível com o player nativo. Tentando abrir em WebView.";
             }
 
-            // Se for URL direta, retorna normalmente
-            res.json({
-                stream_type: 'direct',
-                url: video_url,
-                message: "Acesso autorizado.",
-                title: title,
-                episode: episode_number
-            });
-
+            res.json(response);
         } catch (err) {
             console.error('❌ Erro no streaming:', err);
             res.status(500).json({ error: "Erro ao validar acesso ao streaming." });
         }
+    },
+
+    // Proxy para Google Drive
+    async proxyGoogleDrive(req, res) {
+        const { fileId } = req.params;
+        if (!fileId) {
+            return res.status(400).json({ error: 'File ID não fornecido' });
+        }
+
+        try {
+            const directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+            const response = await fetch(directUrl);
+            const buffer = await response.buffer();
+
+            res.setHeader('Content-Type', response.headers.get('content-type') || 'video/mp4');
+            res.setHeader('Accept-Ranges', 'bytes');
+            res.setHeader('Cache-Control', 'public, max-age=31536000');
+            res.send(buffer);
+        } catch (error) {
+            console.error('❌ Erro no proxy Google Drive:', error);
+            res.status(500).json({ error: 'Erro ao processar link do Google Drive' });
+        }
+    },
+
+    // Proxy para YouTube (iframe embed)
+    async getYouTubeEmbed(req, res) {
+        const { videoId } = req.params;
+        if (!videoId) {
+            return res.status(400).json({ error: 'Video ID não fornecido' });
+        }
+
+        const embedHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+                <style>
+                    * { margin: 0; padding: 0; box-sizing: border-box; }
+                    body { background: #000; overflow: hidden; }
+                    .player-container { position: relative; width: 100vw; height: 100vh; }
+                    iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none; }
+                </style>
+            </head>
+            <body>
+                <div class="player-container">
+                    <iframe src="https://www.youtube.com/embed/${videoId}?autoplay=1&controls=1&rel=0&modestbranding=1&showinfo=0&fs=1" allowfullscreen></iframe>
+                </div>
+            </body>
+            </html>
+        `;
+
+        res.setHeader('Content-Type', 'text/html');
+        res.send(embedHtml);
+    },
+
+    // Proxy para Vimeo
+    async getVimeoEmbed(req, res) {
+        const { videoId } = req.params;
+        if (!videoId) {
+            return res.status(400).json({ error: 'Video ID não fornecido' });
+        }
+
+        const embedHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+                <style>
+                    * { margin: 0; padding: 0; box-sizing: border-box; }
+                    body { background: #000; overflow: hidden; }
+                    .player-container { position: relative; width: 100vw; height: 100vh; }
+                    iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none; }
+                </style>
+            </head>
+            <body>
+                <div class="player-container">
+                    <iframe src="https://player.vimeo.com/video/${videoId}?autoplay=1&title=0&byline=0&portrait=0" allowfullscreen></iframe>
+                </div>
+            </body>
+            </html>
+        `;
+
+        res.setHeader('Content-Type', 'text/html');
+        res.send(embedHtml);
     }
 };
 
@@ -633,9 +791,12 @@ app.post('/api/favorites/toggle', authenticateToken, UserFeatureController.toggl
 app.get('/api/history/continue', authenticateToken, UserFeatureController.getContinueWatching);
 app.post('/api/history/update', authenticateToken, UserFeatureController.updateProgress);
 
-// Rotas de Streaming (Protegidas)
-app.get('/api/stream/:episodeId', authenticateToken, MegaProxyController.streamEpisode);
-app.get('/api/mega/stream', MegaProxyController.streamFromMega);
+// Rotas de Streaming Universal (Protegidas)
+app.get('/api/stream/:episodeId', authenticateToken, UniversalPlayerController.streamEpisode.bind(UniversalPlayerController));
+app.get('/api/universal/stream/mega', UniversalPlayerController.streamMega.bind(UniversalPlayerController));
+app.get('/api/universal/proxy/google-drive/:fileId', UniversalPlayerController.proxyGoogleDrive.bind(UniversalPlayerController));
+app.get('/api/universal/embed/youtube/:videoId', UniversalPlayerController.getYouTubeEmbed.bind(UniversalPlayerController));
+app.get('/api/universal/embed/vimeo/:videoId', UniversalPlayerController.getVimeoEmbed.bind(UniversalPlayerController));
 
 // Rotas Administrativas (Protegidas por Admin)
 app.get('/api/admin/dashboard', authenticateToken, isAdmin, AdminController.getDashboard);
@@ -652,10 +813,14 @@ app.get('/status', (req, res) => {
     res.json({
         status: "SOSTREAM Online",
         serverTime: new Date(),
-        version: "3.3.0",
+        version: "4.0.0",
         environment: process.env.NODE_ENV || 'production',
         features: {
+            universal_player: true,
             mega_proxy: true,
+            google_drive_support: true,
+            youtube_embed: true,
+            vimeo_embed: true,
             premium_check: true
         }
     });
@@ -674,15 +839,26 @@ app.use(errorHandler);
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔════════════════════════════════════════════════════════════════╗
-║         🚀 SOSTREAM PRODUCTION SERVER v3.3 (MEGA FIX)         ║
+║      🚀 SOSTREAM UNIVERSAL PLAYER v4.0 - PRODUCTION READY      ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  📡 PORTA: ${PORT}                                              ║
 ║  🌍 MODO: ${process.env.NODE_ENV || 'production'}                                            ║
-║  📹 MEGA PROXY: CORRIGIDO - Streaming funcional               ║
+║  🎬 UNIVERSAL PLAYER: SUPORTE TOTAL                            ║
+╠════════════════════════════════════════════════════════════════╣
+║  📹 PLATAFORMAS SUPORTADAS:                                    ║
+║     ✓ MEGA.nz (Proxy Nativo)                                  ║
+║     ✓ Google Drive (Proxy + WebView)                          ║
+║     ✓ YouTube (WebView Embed)                                 ║
+║     ✓ Vimeo (WebView Embed)                                   ║
+║     ✓ Dailymotion (WebView Embed)                             ║
+║     ✓ Links Diretos .mp4, .m3u8, .mkv, .webm                  ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  📋 ROTAS DISPONÍVEIS:                                         ║
-║     • Streaming MEGA: /api/mega/stream?url={mega_link}        ║
-║     • Streaming Episódio: /api/stream/:episodeId              ║
+║     • Streaming Universal: /api/stream/:episodeId             ║
+║     • MEGA Proxy: /api/universal/stream/mega?url={link}      ║
+║     • Google Drive Proxy: /api/universal/proxy/google-drive/:id║
+║     • YouTube Embed: /api/universal/embed/youtube/:id         ║
+║     • Vimeo Embed: /api/universal/embed/vimeo/:id            ║
 ╚════════════════════════════════════════════════════════════════╝
     `);
 });
