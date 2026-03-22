@@ -1,5 +1,5 @@
 /**
- * 🚀 SOSTREAM - UNIFIED PRODUCTION SERVER v3.1 (HOTFIX FAVORITES)
+ * 🚀 SOSTREAM - UNIFIED PRODUCTION SERVER v3.2 (MEGA PROXY INTEGRATED)
  * 🛡️ Lead UI/UX Architect & Full-Stack Engineer Version
  *
  * ESPECIFICAÇÕES:
@@ -7,7 +7,7 @@
  * - Autenticação: JWT + Bcrypt
  * - Armazenamento: Metadados, Imagens (BaseURL/Bytea) e Links Externos (Redirecionamento)
  * - CMS: Painel Administrativo integrado
- * - Streaming: Validação Premium/Free
+ * - Streaming: Validação Premium/Free + MEGA Proxy
  */
 
 const express = require('express');
@@ -17,6 +17,7 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const { File } = require('megajs');
 require('dotenv').config();
 
 const app = express();
@@ -47,12 +48,11 @@ app.use(helmet({ contentSecurityPolicy: false }));
 // CORS configurado para aceitar requisições do Flutter Web e Mobile
 app.use(cors({
     origin: function (origin, callback) {
-        // Permite qualquer origem durante o desenvolvimento ou se a origem for nula
         if (!origin || origin.startsWith('http://localhost') || origin.includes('render.com') || origin.includes('127.0.0.1')) {
             callback(null, true);
         } else {
             console.log('CORS bloqueado para origem:', origin);
-            callback(null, true); // Permite temporariamente para testes
+            callback(null, true);
         }
     },
     credentials: true,
@@ -68,9 +68,6 @@ app.use(morgan('dev'));
 // 3. MIDDLEWARES DE SEGURANÇA (AUTH)
 // ==========================================
 
-/**
- * Verifica validade do Token JWT
- */
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -86,9 +83,6 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-/**
- * Verifica se o usuário logado possui flag is_admin
- */
 const isAdmin = async (req, res, next) => {
     try {
         const result = await pool.query('SELECT is_admin FROM users WHERE id = $1', [req.user.id]);
@@ -102,9 +96,6 @@ const isAdmin = async (req, res, next) => {
     }
 };
 
-/**
- * Middleware para logs de erro globais
- */
 const errorHandler = (err, req, res, next) => {
     console.error(`[ERRO CRÍTICO]: ${err.stack}`);
     res.status(500).json({
@@ -262,12 +253,14 @@ const AdminController = {
     },
 
     async createEpisode(req, res) {
-        const { season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free } = req.body;
+        const { season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, mega_url } = req.body;
         try {
+            // Se fornecer mega_url, armazena para uso no streaming
+            const videoSource = video_url || mega_url;
             const result = await pool.query(
-                `INSERT INTO episodes (season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) RETURNING *`,
-                [season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free || false]
+                `INSERT INTO episodes (season_id, episode_number, title, synopsis, duration_minutes, video_url, thumbnail_url, is_free, mega_url, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *`,
+                [season_id, episode_number, title, synopsis, duration_minutes, videoSource, thumbnail_url, is_free || false, mega_url || null]
             );
             res.status(201).json({ message: "Episódio publicado com sucesso!", data: result.rows[0] });
         } catch (err) {
@@ -300,6 +293,21 @@ const AdminController = {
         try {
             await pool.query('UPDATE users SET is_premium = $1 WHERE id = $2', [is_premium, userId]);
             res.json({ message: "Status de premium atualizado com sucesso." });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    },
+
+    async updateEpisodeVideo(req, res) {
+        const { episodeId } = req.params;
+        const { video_url, mega_url } = req.body;
+        try {
+            if (video_url) {
+                await pool.query('UPDATE episodes SET video_url = $1, mega_url = NULL WHERE id = $2', [video_url, episodeId]);
+            } else if (mega_url) {
+                await pool.query('UPDATE episodes SET mega_url = $1, video_url = NULL WHERE id = $2', [mega_url, episodeId]);
+            }
+            res.json({ message: "URL do vídeo atualizada com sucesso!" });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -369,12 +377,11 @@ const UserFeatureController = {
         const userId = req.user.id;
         try {
             const exists = await pool.query('SELECT 1 FROM favorites WHERE user_id = $1 AND media_id = $2', [userId, mediaId]);
-            
+
             if (exists.rows.length > 0) {
                 await pool.query('DELETE FROM favorites WHERE user_id = $1 AND media_id = $2', [userId, mediaId]);
                 return res.json({ status: "removed", message: "Removido da lista de favoritos." });
             } else {
-                // CORREÇÃO: Removido created_at que não existe na tabela original
                 await pool.query('INSERT INTO favorites (user_id, media_id) VALUES ($1, $2)', [userId, mediaId]);
                 return res.json({ status: "added", message: "Adicionado à sua lista de favoritos!" });
             }
@@ -424,7 +431,7 @@ const UserFeatureController = {
             const list = await pool.query(`
                 SELECT wh.progress_seconds, wh.total_seconds, e.title as episode_title, e.episode_number,
                        m.id as media_id, m.title as media_title, m.poster_url, m.banner_url, m.type,
-                       s.season_number
+                       s.season_number, e.id as episode_id
                 FROM watch_history wh
                 JOIN episodes e ON wh.episode_id = e.id
                 JOIN seasons s ON e.season_id = s.id
@@ -478,7 +485,123 @@ const ProfileController = {
 };
 
 // ==========================================
-// 9. DEFINIÇÃO DE ROTAS (PIPELINE COMPLETO)
+// 9. MEGA PROXY STREAMING (INTEGRADO)
+// ==========================================
+
+const MegaProxyController = {
+    async streamFromMega(req, res) {
+        const megaUrl = req.query.url;
+        
+        if (!megaUrl) {
+            return res.status(400).json({ error: 'URL do MEGA não fornecida' });
+        }
+        
+        console.log(`--- MEGA STREAM: Solicitando URL: ${megaUrl} ---`);
+        
+        try {
+            const file = File.fromURL(megaUrl);
+            
+            const headers = {
+                'Content-Type': 'video/mp4',
+                'Accept-Ranges': 'bytes',
+                'Cache-Control': 'public, max-age=31536000',
+            };
+            
+            const range = req.headers.range;
+            if (range) {
+                const fileSize = file.size;
+                const parts = range.replace(/bytes=/, "").split("-");
+                const start = parseInt(parts[0], 10);
+                const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+                const chunksize = (end - start) + 1;
+                
+                headers['Content-Range'] = `bytes ${start}-${end}/${fileSize}`;
+                headers['Content-Length'] = chunksize;
+                res.writeHead(206, headers);
+            } else {
+                headers['Content-Length'] = file.size;
+                res.writeHead(200, headers);
+            }
+            
+            const stream = file.download();
+            
+            stream.on('error', (err) => {
+                console.error('Erro no download MEGA:', err);
+                if (!res.headersSent) {
+                    res.status(500).json({ error: 'Erro ao baixar arquivo do MEGA' });
+                }
+            });
+            
+            stream.pipe(res);
+            
+        } catch (error) {
+            console.error('Erro ao processar MEGA:', error);
+            res.status(500).json({ error: 'Erro ao processar o link do MEGA' });
+        }
+    },
+
+    async streamEpisode(req, res) {
+        const { episodeId } = req.params;
+        const userId = req.user.id;
+
+        try {
+            // Busca informações do episódio
+            const content = await pool.query(`
+                SELECT e.is_free, u.is_premium, e.video_url, e.mega_url, e.title, e.episode_number,
+                       COALESCE(e.video_url, e.mega_url) as source_url
+                FROM episodes e, users u
+                WHERE e.id = $1 AND u.id = $2
+            `, [episodeId, userId]);
+
+            if (content.rows.length === 0) {
+                return res.status(404).json({ error: "Episódio não encontrado." });
+            }
+
+            const { is_free, is_premium, video_url, mega_url, title, episode_number, source_url } = content.rows[0];
+
+            // Validação de acesso
+            if (!is_free && !is_premium) {
+                return res.status(403).json({
+                    error: "CONTEÚDO BLOQUEADO",
+                    message: "Este episódio requer uma assinatura SOSTREAM Premium.",
+                    paywall: true
+                });
+            }
+
+            if (!source_url) {
+                return res.status(404).json({ error: "URL do vídeo não configurada para este episódio." });
+            }
+
+            // Se for URL do MEGA, redireciona para o proxy
+            if (mega_url || source_url.includes('mega.nz')) {
+                const proxyUrl = `/api/mega/stream?url=${encodeURIComponent(source_url)}`;
+                console.log(`🎬 MEGA Proxy: Redirecionando para ${proxyUrl}`);
+                return res.json({
+                    stream_type: 'mega_proxy',
+                    proxy_url: proxyUrl,
+                    title: title,
+                    episode: episode_number
+                });
+            }
+
+            // Se for URL direta, retorna normalmente
+            res.json({
+                stream_type: 'direct',
+                url: video_url,
+                message: "Acesso autorizado.",
+                title: title,
+                episode: episode_number
+            });
+
+        } catch (err) {
+            console.error('Erro no streaming:', err);
+            res.status(500).json({ error: "Erro ao validar acesso ao streaming." });
+        }
+    }
+};
+
+// ==========================================
+// 10. DEFINIÇÃO DE ROTAS (PIPELINE COMPLETO)
 // ==========================================
 
 // --- Rotas Públicas ---
@@ -504,6 +627,10 @@ app.post('/api/favorites/toggle', authenticateToken, UserFeatureController.toggl
 app.get('/api/history/continue', authenticateToken, UserFeatureController.getContinueWatching);
 app.post('/api/history/update', authenticateToken, UserFeatureController.updateProgress);
 
+// --- Rotas de Streaming (Protegidas) ---
+app.get('/api/stream/:episodeId', authenticateToken, MegaProxyController.streamEpisode);
+app.get('/api/mega/stream', MegaProxyController.streamFromMega);
+
 // --- Rotas Administrativas (Protegidas por Admin) ---
 app.get('/api/admin/dashboard', authenticateToken, isAdmin, AdminController.getDashboard);
 app.get('/api/admin/categories', authenticateToken, isAdmin, AdminController.getCategories);
@@ -513,57 +640,26 @@ app.post('/api/admin/media', authenticateToken, isAdmin, AdminController.createM
 app.post('/api/admin/seasons', authenticateToken, isAdmin, AdminController.createSeason);
 app.post('/api/admin/episodes', authenticateToken, isAdmin, AdminController.createEpisode);
 app.delete('/api/admin/media/:id', authenticateToken, isAdmin, AdminController.deleteMedia);
-
-// --- Rota de Streaming com Validação Premium ---
-app.get('/api/stream/:episodeId', authenticateToken, async (req, res) => {
-    try {
-        const userId = req.user.id;
-        const { episodeId } = req.params;
-
-        const content = await pool.query(`
-            SELECT e.is_free, u.is_premium, e.video_url, e.title, e.episode_number
-            FROM episodes e, users u
-            WHERE e.id = $1 AND u.id = $2
-        `, [episodeId, userId]);
-
-        if (content.rows.length === 0) {
-            return res.status(404).json({ error: "Episódio não encontrado." });
-        }
-
-        const { is_free, is_premium, video_url, title, episode_number } = content.rows[0];
-
-        if (!is_free && !is_premium) {
-            return res.status(403).json({
-                error: "CONTEÚDO BLOQUEADO",
-                message: "Este episódio requer uma assinatura SOSTREAM Premium.",
-                paywall: true
-            });
-        }
-
-        res.json({
-            url: video_url,
-            message: "Acesso autorizado.",
-            title: title,
-            episode: episode_number
-        });
-    } catch (err) {
-        console.error('Erro no streaming:', err);
-        res.status(500).json({ error: "Erro ao validar acesso ao streaming." });
-    }
-});
+app.put('/api/admin/episodes/:episodeId/video', authenticateToken, isAdmin, AdminController.updateEpisodeVideo);
 
 // --- Status do Servidor ---
 app.get('/status', (req, res) => {
     res.json({
         status: "SOSTREAM Online",
         serverTime: new Date(),
-        version: "3.1.0",
-        environment: process.env.NODE_ENV || 'production'
+        version: "3.2.0",
+        environment: process.env.NODE_ENV || 'production',
+        features: {
+            mega_proxy: true,
+            premium_check: true,
+            favorites: true,
+            continue_watching: true
+        }
     });
 });
 
 // ==========================================
-// 10. INICIALIZAÇÃO E TRATAMENTO DE ERROS
+// 11. INICIALIZAÇÃO E TRATAMENTO DE ERROS
 // ==========================================
 
 // Catch-all para rotas inexistentes
@@ -578,18 +674,20 @@ app.use(errorHandler);
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔════════════════════════════════════════════════════════════════╗
-║                   🚀 SOSTREAM PRODUCTION SERVER                ║
+║         🚀 SOSTREAM PRODUCTION SERVER v3.2 (MEGA PROXY)       ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  📡 PORTA: ${PORT}                                              ║
 ║  🌍 MODO: ${process.env.NODE_ENV || 'production'}                                            ║
 ║  🛡️ SEGURANÇA: JWT + HELMET + CORS + ADMIN PROTECTION         ║
 ║  💾 DATABASE: PostgreSQL (Neon.tech)                          ║
+║  📹 MEGA PROXY: Ativo - Suporte a streaming via MEGA.nz       ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  📋 ROTAS DISPONÍVEIS:                                         ║
 ║     • Públicas: /api/auth/*, /api/discovery, /api/media/:id    ║
 ║     • Privadas: /api/profile, /api/favorites, /api/history/*   ║
 ║     • Admin: /api/admin/* (Requer is_admin=true)              ║
 ║     • Streaming: /api/stream/:episodeId (Premium Check)       ║
+║     • MEGA Proxy: /api/mega/stream?url={mega_link}           ║
 ╠════════════════════════════════════════════════════════════════╣
 ║  👑 CREDENCIAIS ADMIN:                                         ║
 ║     • Email: admin@sostream.com                               ║
